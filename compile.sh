@@ -30,7 +30,10 @@ function git_secure_clone() {
 NTASK=$(nproc)
 
 # install build dependencies
-apk add --no-cache --virtual build autoconf libtool automake git geoip-dev yajl-dev g++ gcc curl-dev libxml2-dev pcre-dev make linux-headers libmaxminddb-dev musl-dev lua-dev gd-dev gnupg brotli-dev openssl-dev
+apk add --no-cache --virtual build autoconf libtool automake git geoip-dev yajl-dev g++ gcc curl-dev libxml2-dev pcre-dev make linux-headers libmaxminddb-dev musl-dev lua-dev gd-dev gnupg brotli-dev openssl-dev outils-signify
+
+# turn the detached message off
+git config --global advice.detachedHead false
 
 # compile and install ModSecurity library
 cd /tmp
@@ -54,7 +57,7 @@ mkdir /opt/owasp
 cp -r rules /opt/owasp/crs
 cp crs-setup.conf.example /opt/owasp/crs.conf
 
-# get nginx modules
+# get nginx modules
 cd /tmp
 # ModSecurity connector for nginx
 git_secure_clone https://github.com/SpiderLabs/ModSecurity-nginx.git 2497e6ac654d0b117b9534aa735b757c6b11c84f
@@ -141,6 +144,34 @@ git_secure_clone https://github.com/openresty/lua-nginx-module.git 2d23bc4f0a29e
 export LUAJIT_LIB=/usr/local/lib
 export LUAJIT_INC=/usr/local/include/luajit-2.1
 
+if [ "${USE_LIBRESSL}" = "yes" ] ; then
+	echo "Recompile nginx with libressl"
+	# if dockerfile is configure to use libressl we need to rebuild nginx
+	
+	# prepare libressl
+	cd /tmp
+	LATEST_LIBRESSL_VERSION=$(curl -L https://ftp.openbsd.org/pub/OpenBSD/LibreSSL/ | egrep -o "libressl\-[0-9.]+\.tar\.gz" | tail -n 1)
+	wget "https://ftp.openbsd.org/pub/OpenBSD/LibreSSL/${LATEST_LIBRESSL_VERSION}"
+	wget "https://ftp.openbsd.org/pub/OpenBSD/LibreSSL/SHA256.sig"
+	check=$(signify -C -p /tmp/libressl-keys/libressl.pub -x SHA256.sig ${LATEST_LIBRESSL_VERSION} 2>&1 | grep "^${LATEST_LIBRESSL_VERSION}: OK")
+	if [ "$check" = "" ] ; then
+		echo "[!] Wrong signature from libressl source !"
+		exit 1
+	fi
+	tar -xvzf ${LATEST_LIBRESSL_VERSION}
+
+	wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz
+	tar -xvzf nginx-${NGINX_VERSION}.tar.gz
+	cd nginx-${NGINX_VERSION}
+	CONFARGS=$(nginx -V 2>&1 | sed -n -e 's/^.*arguments: //p')
+    CONFARGS=${CONFARGS/-Os -fomit-frame-pointer/-Os}
+	./configure $CONFARGS --with-openssl=/tmp/${LATEST_LIBRESSL_VERSION//.tar*}
+	
+	make -j $NTASK
+	make install
+	strip /usr/sbin/nginx
+fi
+
 # compile and install dynamic modules
 cd /tmp
 wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz
@@ -156,6 +187,8 @@ cd nginx-$NGINX_VERSION
 CONFARGS=$(nginx -V 2>&1 | sed -n -e 's/^.*arguments: //p')
 CONFARGS=${CONFARGS/-Os -fomit-frame-pointer -g/-Os}
 ./configure $CONFARGS --add-dynamic-module=/tmp/ModSecurity-nginx --add-dynamic-module=/tmp/headers-more-nginx-module --add-dynamic-module=/tmp/ngx_http_geoip2_module --add-dynamic-module=/tmp/nginx_cookie_flag_module --add-dynamic-module=/tmp/lua-nginx-module --add-dynamic-module=/tmp/ngx_brotli
+nginx -V
+
 make -j $NTASK modules
 cp ./objs/*.so /usr/lib/nginx/modules
 
